@@ -97,6 +97,8 @@ namespace TableStorage.Abstractions
         /// <returns>The record count</returns>
         int GetRecordCount();
 
+        IEnumerable<T> GetPagedRecords(int PageNumber, int PageSize);
+        
         #endregion Synchronous Methods
 
         #region Asynchronous Methods

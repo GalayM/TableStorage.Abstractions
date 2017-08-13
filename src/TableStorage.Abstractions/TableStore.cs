@@ -2,10 +2,12 @@
 using Microsoft.WindowsAzure.Storage.RetryPolicies;
 using Microsoft.WindowsAzure.Storage.Table;
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
 using System.Net;
 using System.Threading.Tasks;
+using Useful.Extensions;
 
 namespace TableStorage.Abstractions
 {
@@ -323,6 +325,88 @@ namespace TableStorage.Abstractions
             } while (continuationToken != null);
 
             return allItems;
+        }
+
+        /// <summary>
+        /// Store the page continuation tokens
+        /// </summary>
+        private IDictionary<long, TableContinuationToken> _pageTokens = new ConcurrentDictionary<long, TableContinuationToken>();
+
+        /// <summary>
+        /// Get a page of records from the table
+        /// </summary>
+        /// <param name="pageNumber">The page number</param>
+        /// <param name="pageSize">The size of the page</param>
+        /// <returns>The records found</returns>
+        public IEnumerable<T> GetPagedRecords(int pageNumber, int pageSize)
+        {
+            const int chunkSize = 1000;
+
+            var recordPosition = pageNumber * pageSize;
+
+            int nextRecordChunk;
+            if (recordPosition % chunkSize == 0)
+            {
+                nextRecordChunk = recordPosition;
+            }
+            else
+            {
+                nextRecordChunk = recordPosition / chunkSize * chunkSize + chunkSize;
+            }
+
+            var calculatedRelativePage = (recordPosition - (nextRecordChunk - chunkSize)) / pageSize;
+            var startRecord = (calculatedRelativePage - 1) * pageSize;
+
+            TableContinuationToken continuationToken;
+            _pageTokens.TryGetValue(nextRecordChunk - chunkSize, out continuationToken);
+
+            var backFillCount = 1;
+            if (continuationToken == null)
+            {
+                backFillCount = (int)Math.Round((double)(nextRecordChunk / chunkSize == 0 ? 1 : nextRecordChunk / chunkSize), MidpointRounding.AwayFromZero);
+            }
+
+            var items = GetStorageItems(backFillCount, nextRecordChunk, continuationToken);
+
+            return items?.Page(startRecord, pageSize);
+        }
+
+        /// <summary>
+        /// Get the storage items
+        /// </summary>
+        /// <param name="backFillCount">The amount of pages to back fill</param>
+        /// <param name="nextRecordChunk">The next record chunk</param>
+        /// <param name="continuationToken">The continuation token</param>
+        /// <returns>The items for the filter or null if none found</returns>
+        private IEnumerable<T> GetStorageItems(int backFillCount, int nextRecordChunk, TableContinuationToken continuationToken)
+        {
+            TableQuerySegment<T> items = null;
+
+            var query = new TableQuery<T>();
+            var storeKey = backFillCount > 1 ? 1000 : nextRecordChunk;
+
+            for (var i = 0; i < backFillCount; ++i)
+            {
+                if (i > 0 && continuationToken == null)
+                {
+                    // Must be passed the storage end point so just return
+                    items = null;
+                    break;
+                }
+
+                items = _cloudTable.ExecuteQuerySegmented(query, continuationToken);
+
+                continuationToken = items.ContinuationToken;
+
+                if (!_pageTokens.ContainsKey(storeKey))
+                {
+                    _pageTokens.Add(storeKey, continuationToken);
+                }
+
+                storeKey += 1000;
+            }
+
+            return items;
         }
 
         /// <summary>
